@@ -1,3 +1,5 @@
+// must be loaded before ocore: ocore/storage.js freezes String.prototype, which breaks @vladfrangu/async_event_emitter (used by discord.js)
+require('discord.js');
 const conf = require('ocore/conf');
 const eventBus = require('ocore/event_bus.js');
 const device = require('ocore/device.js');
