@@ -11,6 +11,7 @@ const discordInstance = require('./discordInstance');
 const { isValidAddress } = require('ocore/validation_utils');
 const { getRoleByWalletAddress } = require('./utils/getRoleByWalletAddress.js');
 const { sendToChannel } = require('./utils/sendToChannel.js');
+const { retry } = require('./utils/retry.js');
 const { addDonor, getNickDataByWallet, removeDonor } = require('./db/api.js');
 const { checkAndUpdateStatus } = require('./checkStatus.js');
 
@@ -47,15 +48,8 @@ eventBus.once('headless_wallet_ready', () => {
   // b. User send signed message
   // c. User send nickname
 
-  // any uncaught error would crash the process (see uncaughtException handler in ocore/network.js)
-  eventBus.on('text', (from_address, data) => {
-    handleText(from_address, data).catch(e => {
-      console.error("Can't handle message", e);
-      device.sendMessageToDevice(from_address, 'text', texts.ERROR);
-    });
-  });
-
-  const handleText = async (from_address, data) => {
+  // discord api calls are retried once, if they fail again the error crashes the process (see uncaughtException handler in ocore/network.js)
+  eventBus.on('text', async (from_address, data) => {
     let arrSignedMessageMatches = data.match(/\(signed-message:(.+?)\)/);
 
     const trimmedData = data.trim();
@@ -68,7 +62,14 @@ eventBus.once('headless_wallet_ready', () => {
     if (isValidAddress(trimmedData)) {
       wallet = trimmedData;
 
-      const role = await getRoleByWalletAddress(wallet);
+      let role;
+
+      try {
+        role = await getRoleByWalletAddress(wallet);
+      } catch (e) {
+        console.error("Can't get donations", e);
+        return device.sendMessageToDevice(from_address, 'text', texts.ERROR);
+      }
 
       if (role) {
         sessions[from_address] = { wallet, role, signed: false };
@@ -125,12 +126,12 @@ eventBus.once('headless_wallet_ready', () => {
         // we have all data
 
         // common data
-        const guild = await discordInstance.guilds.fetch(conf.SERVER_ID);
+        const guild = await retry(() => discordInstance.guilds.fetch(conf.SERVER_ID));
 
         // user data (from discord api) by nickname
         // search (REST) matches by prefix and doesn't require the GuildMembers intent
         // discord usernames are at most 32 chars, longer queries are rejected by the API
-        const matches = nick.length <= 32 ? await guild.members.search({ query: nick, limit: 100 }) : null;
+        const matches = nick.length <= 32 ? await retry(() => guild.members.search({ query: nick, limit: 100 })) : null;
         const member = matches?.find(m => m.user.username.toLowerCase() === nick.toLowerCase());
         const user = member?.user;
 
@@ -140,50 +141,39 @@ eventBus.once('headless_wallet_ready', () => {
           if (lastNickData) {
             // remove last nick role
 
-            try {
-              // null if the user is no longer on the server (10007 - Unknown Member)
-              const lastMember = await guild.members.fetch({ user: String(lastNickData.user_id), force: true }).catch(e => {
-                if (e.code === 10007) return null;
-                throw e;
-              });
+            // null if the user is no longer on the server (10007 - Unknown Member)
+            const lastMember = await retry(() => guild.members.fetch({ user: String(lastNickData.user_id), force: true }).catch(e => {
+              if (e.code === 10007) return null;
+              throw e;
+            }));
 
-              if (lastMember) {
-                // last user still in discord server
+            if (lastMember) {
+              // last user still in discord server
 
-                if (lastMember.id === user.id && lastNickData.role_id === roleId) {
-                  return device.sendMessageToDevice(from_address, 'text', texts.ALREADY_HAVE_STATUS);
-                } else {
-                  device.sendMessageToDevice(from_address, 'text', texts.LAST_NICK(lastNickData.nick_name));
+              if (lastMember.id === user.id && lastNickData.role_id === roleId) {
+                return device.sendMessageToDevice(from_address, 'text', texts.ALREADY_HAVE_STATUS);
+              } else {
+                device.sendMessageToDevice(from_address, 'text', texts.LAST_NICK(lastNickData.nick_name));
 
-                  const role = await guild.roles.fetch(lastNickData.role_id);
+                const role = await retry(() => guild.roles.fetch(lastNickData.role_id));
 
-                  if (role) await lastMember.roles.remove(role); // the role may have been deleted on the server
+                if (role) await retry(() => lastMember.roles.remove(role)); // the role may have been deleted on the server
 
-                  await removeDonor(lastNickData.donor);
-                }
+                await removeDonor(lastNickData.donor);
               }
-            } catch (e) {
-              console.error("Can't remove role", e);
-              return device.sendMessageToDevice(from_address, 'text', texts.ERROR);
             }
           }
 
           // update role process
-          try {
-            const role = await guild.roles.fetch(roleId);
+          const role = await retry(() => guild.roles.fetch(roleId));
 
-            await member.roles.add(role);
+          await retry(() => member.roles.add(role));
 
-            await addDonor(wallet, nick, role.id, user.id, from_address);
+          await addDonor(wallet, nick, role.id, user.id, from_address);
 
-            device.sendMessageToDevice(from_address, 'text', texts.UPDATED(role.name));
+          device.sendMessageToDevice(from_address, 'text', texts.UPDATED(role.name));
 
-            await sendToChannel(user.globalName || user.username, role);
-
-          } catch (e) {
-            console.log("Can't add role", e);
-            device.sendMessageToDevice(from_address, 'text', texts.ERROR);
-          }
+          await sendToChannel(user.globalName || user.username, role);
 
           delete sessions[from_address];
 
@@ -197,7 +187,7 @@ eventBus.once('headless_wallet_ready', () => {
     } else {
       device.sendMessageToDevice(from_address, 'text', texts.INSERT_ADDRESS);
     }
-  };
+  });
 });
 
 async function start() {
@@ -205,5 +195,5 @@ async function start() {
 
   await db.create(); // create db if not exists
 
-  setInterval(() => checkAndUpdateStatus().catch(e => console.error("Can't check statuses", e)), CHECK_INTERVAL);
+  setInterval(checkAndUpdateStatus, CHECK_INTERVAL);
 }
