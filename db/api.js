@@ -7,7 +7,7 @@ async function getNickDataByWallet(wallet) {
 }
 
 async function addDonor(wallet, nick, roleID, userID, deviceAddress) {
-  return await db.query(`INSERT INTO ${conf.prefix}_donors (donor, nick_name, role_id, user_id, device_address) VALUES (?,?,?,?,?)`, [wallet, nick, roleID, userID, deviceAddress]);
+  return await db.query(`REPLACE INTO ${conf.prefix}_donors (donor, nick_name, role_id, user_id, device_address) VALUES (?,?,?,?,?)`, [wallet, nick, roleID, userID, deviceAddress]);
 }
 
 async function removeDonor(wallet) {

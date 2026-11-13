@@ -29,6 +29,7 @@ const texts = {
   NOT_FOUND_NICK: "No such discord nick (in Obyte server). Please try again.",
   SIGN_MESSAGE: (wallet) => `Please sign this message to prove that you own the address: [${wallet}](sign-message-request: I own the address ${wallet})`,
   SIGN_MESSAGE_ERROR: "Please sign the message to prove that you own the address.",
+  ERROR: "Something went wrong. Please try again later.",
 }
 
 eventBus.once('headless_wallet_ready', () => {
@@ -46,7 +47,15 @@ eventBus.once('headless_wallet_ready', () => {
   // b. User send signed message
   // c. User send nickname
 
-  eventBus.on('text', async (from_address, data) => {
+  // any uncaught error would crash the process (see uncaughtException handler in ocore/network.js)
+  eventBus.on('text', (from_address, data) => {
+    handleText(from_address, data).catch(e => {
+      console.error("Can't handle message", e);
+      device.sendMessageToDevice(from_address, 'text', texts.ERROR);
+    });
+  });
+
+  const handleText = async (from_address, data) => {
     let arrSignedMessageMatches = data.match(/\(signed-message:(.+?)\)/);
 
     const trimmedData = data.trim();
@@ -71,6 +80,8 @@ eventBus.once('headless_wallet_ready', () => {
     } else if (data.startsWith("[Signed message]")) {
       // b) User send signed message
       // Return: if we find address and signed message is correct we send message "Please send your discord nick (in Obyte server)" or error "Please sign the message to prove that you own the address."
+
+      if (!arrSignedMessageMatches) return device.sendMessageToDevice(from_address, 'text', texts.SIGN_MESSAGE_ERROR);
 
       let signedMessageBase64 = arrSignedMessageMatches[1];
 
@@ -114,11 +125,14 @@ eventBus.once('headless_wallet_ready', () => {
         // we have all data
 
         // common data
-        const members = await discordInstance.guilds.fetch(conf.SERVER_ID).then(data => data.members.fetch());
-        const membersData = members.toJSON().map(member => ({ ...member.user }));
+        const guild = await discordInstance.guilds.fetch(conf.SERVER_ID);
 
         // user data (from discord api) by nickname
-        const user = membersData.find(({ username }) => username.toLowerCase() === nick.toLowerCase());
+        // search (REST) matches by prefix and doesn't require the GuildMembers intent
+        // discord usernames are at most 32 chars, longer queries are rejected by the API
+        const matches = nick.length <= 32 ? await guild.members.search({ query: nick, limit: 100 }) : null;
+        const member = matches?.find(m => m.user.username.toLowerCase() === nick.toLowerCase());
+        const user = member?.user;
 
         if (user) {
           const lastNickData = await getNickDataByWallet(wallet);
@@ -127,35 +141,35 @@ eventBus.once('headless_wallet_ready', () => {
             // remove last nick role
 
             try {
-              const lastMemberData = membersData.find(({ id }) => id === lastNickData.user_id);
+              // null if the user is no longer on the server (10007 - Unknown Member)
+              const lastMember = await guild.members.fetch({ user: String(lastNickData.user_id), force: true }).catch(e => {
+                if (e.code === 10007) return null;
+                throw e;
+              });
 
-              if (lastMemberData) {
+              if (lastMember) {
                 // last user still in discord server
 
-                if (lastMemberData.id === user.id && lastNickData.role_id === roleId) {
+                if (lastMember.id === user.id && lastNickData.role_id === roleId) {
                   return device.sendMessageToDevice(from_address, 'text', texts.ALREADY_HAVE_STATUS);
                 } else {
                   device.sendMessageToDevice(from_address, 'text', texts.LAST_NICK(lastNickData.nick_name));
 
-                  const guild = await discordInstance.guilds.fetch(conf.SERVER_ID);
-
                   const role = await guild.roles.fetch(lastNickData.role_id);
-                  const lastMember = members.get(lastMemberData.id);
 
-                  await lastMember.roles.remove(role);
+                  if (role) await lastMember.roles.remove(role); // the role may have been deleted on the server
 
                   await removeDonor(lastNickData.donor);
                 }
               }
             } catch (e) {
-              return console.error("Can't remove role", e);
+              console.error("Can't remove role", e);
+              return device.sendMessageToDevice(from_address, 'text', texts.ERROR);
             }
           }
 
           // update role process
           try {
-            const guild = await discordInstance.guilds.fetch(conf.SERVER_ID);
-            const member = members.get(user.id);
             const role = await guild.roles.fetch(roleId);
 
             await member.roles.add(role);
@@ -168,6 +182,7 @@ eventBus.once('headless_wallet_ready', () => {
 
           } catch (e) {
             console.log("Can't add role", e);
+            device.sendMessageToDevice(from_address, 'text', texts.ERROR);
           }
 
           delete sessions[from_address];
@@ -182,7 +197,7 @@ eventBus.once('headless_wallet_ready', () => {
     } else {
       device.sendMessageToDevice(from_address, 'text', texts.INSERT_ADDRESS);
     }
-  });
+  };
 });
 
 async function start() {
@@ -190,5 +205,5 @@ async function start() {
 
   await db.create(); // create db if not exists
 
-  setInterval(checkAndUpdateStatus, CHECK_INTERVAL);
+  setInterval(() => checkAndUpdateStatus().catch(e => console.error("Can't check statuses", e)), CHECK_INTERVAL);
 }
