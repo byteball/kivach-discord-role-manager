@@ -8,8 +8,6 @@ const { sendToChannel } = require("./utils/sendToChannel");
 
 const checkAndUpdateStatus = async () => {
   const donors = await getAllDonors();
-  const members = await discordInstance.guilds.fetch(conf.SERVER_ID).then(data => data.members.fetch());
-  const membersData = members.toJSON().map(member => ({ ...member.user }));
   const guild = await discordInstance.guilds.fetch(conf.SERVER_ID);
 
   console.error('Update time: ', Date.now());
@@ -18,20 +16,21 @@ const checkAndUpdateStatus = async () => {
     const donor = donors[i]; // actualRole = conf.discordRoles[2] // for test
     const actualRole = await getRoleByWalletAddress(donor.donor);
 
-    if (String(donor.role_id) !== String(actualRole.id)) {
-      const user = membersData.find(({ id }) => id === donor.user_id);
-      console.error('user', user.globalName + ' -> ' + actualRole.name);
+    if (actualRole && String(donor.role_id) !== String(actualRole.id)) {
+      // null if the user is no longer on the server (10007 - Unknown Member)
+      const member = await guild.members.fetch({ user: String(donor.user_id), force: true }).catch(e => {
+        if (e.code === 10007) return null;
+        throw e;
+      });
+      const user = member?.user;
 
       if (user) {
-        const member = members.get(user.id);
+        console.error('user', user.globalName + ' -> ' + actualRole.name);
+
         const oldRole = await guild.roles.fetch(donor.role_id);
         const newRole = await guild.roles.fetch(actualRole.id);
 
-        try {
-          await member.roles.remove(oldRole);
-        } catch (e) {
-          console.error("Can't remove role", e, donor.donor);
-        }
+        if (oldRole) await member.roles.remove(oldRole); // the role may have been deleted on the server
 
         await member.roles.add(newRole);
 
