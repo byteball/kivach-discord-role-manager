@@ -11,7 +11,6 @@ const discordInstance = require('./discordInstance');
 const { isValidAddress } = require('ocore/validation_utils');
 const { getRoleByWalletAddress } = require('./utils/getRoleByWalletAddress.js');
 const { sendToChannel } = require('./utils/sendToChannel.js');
-const { retry } = require('./utils/retry.js');
 const { addDonor, getNickDataByWallet, removeDonor } = require('./db/api.js');
 const { checkAndUpdateStatus } = require('./checkStatus.js');
 
@@ -48,7 +47,7 @@ eventBus.once('headless_wallet_ready', () => {
   // b. User send signed message
   // c. User send nickname
 
-  // discord api calls are retried once, if they fail again the error crashes the process (see uncaughtException handler in ocore/network.js)
+  // an error in discord api calls crashes the process (see uncaughtException handler in ocore/network.js)
   eventBus.on('text', async (from_address, data) => {
     let arrSignedMessageMatches = data.match(/\(signed-message:(.+?)\)/);
 
@@ -126,12 +125,12 @@ eventBus.once('headless_wallet_ready', () => {
         // we have all data
 
         // common data
-        const guild = await retry(() => discordInstance.guilds.fetch(conf.SERVER_ID));
+        const guild = await discordInstance.guilds.fetch(conf.SERVER_ID);
 
         // user data (from discord api) by nickname
         // search (REST) matches by prefix and doesn't require the GuildMembers intent
         // discord usernames are at most 32 chars, longer queries are rejected by the API
-        const matches = nick.length <= 32 ? await retry(() => guild.members.search({ query: nick, limit: 100 })) : null;
+        const matches = nick.length <= 32 ? await guild.members.search({ query: nick, limit: 100 }) : null;
         const member = matches?.find(m => m.user.username.toLowerCase() === nick.toLowerCase());
         const user = member?.user;
 
@@ -142,10 +141,10 @@ eventBus.once('headless_wallet_ready', () => {
             // remove last nick role
 
             // null if the user is no longer on the server (10007 - Unknown Member)
-            const lastMember = await retry(() => guild.members.fetch({ user: String(lastNickData.user_id), force: true }).catch(e => {
+            const lastMember = await guild.members.fetch({ user: String(lastNickData.user_id), force: true }).catch(e => {
               if (e.code === 10007) return null;
               throw e;
-            }));
+            });
 
             if (lastMember) {
               // last user still in discord server
@@ -155,9 +154,9 @@ eventBus.once('headless_wallet_ready', () => {
               } else {
                 device.sendMessageToDevice(from_address, 'text', texts.LAST_NICK(lastNickData.nick_name));
 
-                const role = await retry(() => guild.roles.fetch(lastNickData.role_id));
+                const role = await guild.roles.fetch(lastNickData.role_id);
 
-                if (role) await retry(() => lastMember.roles.remove(role)); // the role may have been deleted on the server
+                if (role) await lastMember.roles.remove(role); // the role may have been deleted on the server
 
                 await removeDonor(lastNickData.donor);
               }
@@ -165,9 +164,9 @@ eventBus.once('headless_wallet_ready', () => {
           }
 
           // update role process
-          const role = await retry(() => guild.roles.fetch(roleId));
+          const role = await guild.roles.fetch(roleId);
 
-          await retry(() => member.roles.add(role));
+          await member.roles.add(role);
 
           await addDonor(wallet, nick, role.id, user.id, from_address);
 

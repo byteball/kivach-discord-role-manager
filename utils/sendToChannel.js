@@ -2,11 +2,10 @@ const { EmbedBuilder } = require("discord.js");
 const conf = require('ocore/conf');
 
 const discordInstance = require("../discordInstance");
-const { retry } = require("./retry");
 
 async function sendToChannel(userGlobalName, role) {
   if (process.env.CHANNEL_ID) {
-    const channel = await retry(() => discordInstance.channels.fetch(process.env.CHANNEL_ID));
+    const channel = await discordInstance.channels.fetch(process.env.CHANNEL_ID);
 
     const roleFields = conf.discordRoles.sort((a, b) => a.minimum_usd_donation - b.minimum_usd_donation).map(role => ({
       name: role.name, value: `Min. $${role.minimum_usd_donation}`, inline: false
@@ -19,7 +18,7 @@ async function sendToChannel(userGlobalName, role) {
       .setColor(role.color)
       .setFields(roleFields);
 
-    await retry(() => channel.send({ embeds: [embed] }));
+    await channel.send({ embeds: [embed] });
   }
 }
 
